@@ -1,0 +1,746 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Traffic</title>
+<style>
+:root {
+  --bg: #f5f6f8; --card: #ffffff; --fg: #1d2026; --muted: #6b7280; --line: #e2e5ea; --code-bg: #f3f4f6;
+  --you: #2563eb;    --you-bg: #eef4ff;
+  --claude: #15803d; --claude-bg: #edf9f1;
+  --call: #b45309;   --call-bg: #fff6e8;
+  --result: #7c3aed; --result-bg: #f4efff;
+  --error: #dc2626;  --error-bg: #fdf0f0;
+  --sys: #6b7280;    --sys-bg: #f3f4f6;
+  --j-key: #9333ea; --j-str: #0f766e; --j-num: #c2410c; --j-lit: #2563eb;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111318; --card: #1a1d23; --fg: #e6e8eb; --muted: #9aa1ab; --line: #2c3038; --code-bg: #22262d;
+    --you: #6ea8ff;    --you-bg: #15233a;
+    --claude: #4ade80; --claude-bg: #13281b;
+    --call: #fbbf24;   --call-bg: #2b2311;
+    --result: #c4a5ff; --result-bg: #231a37;
+    --error: #f87171;  --error-bg: #331a1b;
+    --sys: #9aa1ab;    --sys-bg: #20232a;
+    --j-key: #d8b4fe; --j-str: #5eead4; --j-num: #fdba74; --j-lit: #93c5fd;
+  }
+}
+* { box-sizing: border-box; }
+html { overflow-anchor: none; } /* we keep the scroll position ourselves */
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+button { font: inherit; color: inherit; }
+
+/* top bar */
+.bar { position: sticky; top: 0; z-index: 10; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+  padding: 10px 16px; background: var(--card); border-bottom: 1px solid var(--line); }
+.bar h1 { font-size: 15px; margin: 0; }
+.conn { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.conn::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.conn.live::before { background: var(--claude); }
+.conn.down::before { background: var(--error); }
+.bar input[type=search] { flex: 1 1 200px; min-width: 0; padding: 5px 9px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--fg); font: inherit; }
+.bar label { font-size: 13px; display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+.btn { padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); cursor: pointer; font-size: 13px; }
+.btn.on { background: var(--call-bg); border-color: var(--call); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+.legend .tag { font-size: 11px; }
+
+main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+.empty { color: var(--muted); text-align: center; padding: 60px 0; }
+.pill { position: fixed; top: 64px; left: 50%; transform: translateX(-50%); z-index: 11; padding: 5px 14px; border-radius: 999px;
+  border: 0; background: var(--you); color: #fff; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.2); font-size: 13px; }
+
+/* cards */
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 18px; overflow: hidden; }
+.flash { outline: 2px solid var(--call); }
+.head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; padding: 9px 14px; font: 12px var(--mono); color: var(--muted); }
+.head .id { color: var(--fg); font-weight: 700; font-size: 13px; }
+.head .model { color: var(--fg); }
+.head .bad { color: var(--error); font-weight: 600; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--call); animation: pulse 1s infinite alternate; }
+@keyframes pulse { from { opacity: .25; } to { opacity: 1; } }
+
+details > summary { cursor: pointer; list-style: none; }
+details > summary::-webkit-details-marker { display: none; }
+.section { border-top: 1px solid var(--line); }
+.section > summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 7px 14px; font-size: 13px; user-select: none; }
+.section > summary::before, .tool > summary::before, .fold > summary::before { content: "▸"; color: var(--muted); width: 10px; }
+.section[open] > summary::before, .tool[open] > summary::before, .fold[open] > summary::before { content: "▾"; }
+.sec-name { font-weight: 650; }
+.sec-meta { color: var(--muted); font-size: 12px; }
+.badge { font-size: 11px; padding: 0 6px; border-radius: 4px; background: var(--call-bg); color: var(--call); border: 1px solid var(--call); }
+.section-body { padding: 2px 14px 12px; }
+.section.main > summary .sec-name { font-size: 14px; }
+.muted { color: var(--muted); }
+
+/* message blocks */
+.msg + .msg { margin-top: 14px; }
+.block { border-left: 4px solid var(--sys); background: var(--sys-bg); border-radius: 6px; margin: 8px 0; }
+.block-head { display: flex; align-items: center; gap: 8px; padding: 5px 10px; min-width: 0; }
+.block-body { padding: 0 12px 10px; min-width: 0; }
+.tag { font: 700 11px var(--mono); letter-spacing: .04em; padding: 1px 7px; border-radius: 4px; color: #fff; background: var(--sys); white-space: nowrap; }
+.preview { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.spacer { flex: 1; }
+.k-you     { border-color: var(--you);    background: var(--you-bg); }    .k-you .tag     { background: var(--you); }
+.k-claude  { border-color: var(--claude); background: var(--claude-bg); } .k-claude .tag  { background: var(--claude); }
+.k-call    { border-color: var(--call);   background: var(--call-bg); }   .k-call .tag    { background: var(--call); }
+.k-result  { border-color: var(--result); background: var(--result-bg); } .k-result .tag  { background: var(--result); }
+.k-error   { border-color: var(--error);  background: var(--error-bg); }  .k-error .tag   { background: var(--error); }
+.k-sys .tag, .k-thinking .tag { background: var(--sys); }
+.k-thinking .text { font-style: italic; color: var(--muted); }
+@media (prefers-color-scheme: dark) { .tag { color: #111318; } }
+details.block > summary { padding-right: 10px; }
+.k-you .text, .k-claude .text { font-size: 14.5px; }
+
+.text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.more { display: inline-block; margin-top: 4px; padding: 1px 8px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--card); cursor: pointer; font-size: 12px; }
+.copy { padding: 0 6px; border: 1px solid transparent; border-radius: 4px; background: none; cursor: pointer; font-size: 11px; color: var(--muted); }
+.copy:hover { border-color: var(--line); background: var(--card); }
+
+.slot { margin: 0 12px 10px 18px; }
+.slot .block { margin: 0; }
+.awaiting { font-size: 12px; color: var(--muted); font-style: italic; padding: 2px 0 0 4px; }
+.answers { display: inline-block; font: 12px var(--mono); color: var(--call); text-decoration: none; margin-bottom: 6px; }
+.answers:hover { text-decoration: underline; }
+.cursor::after { content: "▍"; color: var(--claude); animation: pulse .6s infinite alternate; }
+
+/* tools list and system prompt */
+.tool { border-bottom: 1px dashed var(--line); }
+.tool > summary { display: flex; gap: 8px; padding: 5px 0; min-width: 0; }
+.tool-name { font: 600 13px var(--mono); white-space: nowrap; }
+.tool-body { padding: 0 0 10px 18px; }
+.sys-part + .sys-part { border-top: 1px dashed var(--line); margin-top: 8px; padding-top: 8px; }
+.part-head { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+
+/* JSON */
+.json { font: 12.5px/1.55 var(--mono); overflow-wrap: anywhere; }
+.json details > summary { display: inline; }
+.j-row > details.j-node { display: inline; }
+.j-children { padding-left: 16px; border-left: 1px solid var(--line); margin-left: 3px; }
+.j-row > .text { display: block; padding-left: 12px; color: var(--j-str); }
+.j-key { color: var(--j-key); } .j-str { color: var(--j-str); } .j-num { color: var(--j-num); } .j-lit { color: var(--j-lit); }
+.j-punct { color: var(--muted); }
+.raw-label { font-size: 12px; font-weight: 600; margin: 8px 0 2px; color: var(--muted); }
+
+@media (max-width: 600px) {
+  main { padding: 12px; }
+  .section-body { padding: 2px 10px 10px; }
+  .block-body { padding: 0 8px 8px; }
+}
+</style>
+</head>
+<body>
+<div class="bar">
+  <h1>Agent Traffic</h1>
+  <span class="conn" id="conn">connecting…</span>
+  <input type="search" id="filter" placeholder="Filter cards…">
+  <label><input type="checkbox" id="hideOther" checked> Hide non-message requests</label>
+  <button class="btn" id="pause">Pause</button>
+  <button class="btn" id="clear">Clear view</button>
+  <div class="legend">
+    <span class="tag" style="background:var(--you)">YOU</span>
+    <span class="tag" style="background:var(--claude)">CLAUDE</span>
+    <span class="tag" style="background:var(--call)">CALL</span>
+    <span class="tag" style="background:var(--result)">RESULT</span>
+    <span class="tag" style="background:var(--error)">ERROR</span>
+    <span class="tag" style="background:var(--sys)">SYSTEM · THINKING</span>
+  </div>
+</div>
+<button class="pill" id="pill" hidden></button>
+<main>
+  <div id="list"></div>
+  <div class="empty" id="empty">No traffic yet. Run <code>ANTHROPIC_BASE_URL=http://localhost:PORT claude</code>.</div>
+</main>
+<script>
+"use strict";
+
+// ---------- tiny DOM helper ----------
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of children.flat(Infinity)) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c));
+  return el;
+}
+
+// <details> whose body is built on first open (long sessions would otherwise build huge DOMs).
+// rebuild: build again on every open, for content that can change (the raw view).
+function lazyDetails(summary, build, { open = false, cls = "section", summaryCls, rebuild = false } = {}) {
+  const d = h("details", { class: cls }, h("summary", { class: summaryCls }, summary));
+  let body = null;
+  const ensure = () => {
+    if (body && !rebuild) return;
+    const next = build();
+    body ? body.replaceWith(next) : d.append(next);
+    body = next;
+  };
+  if (open) { d.open = true; ensure(); }
+  d.addEventListener("toggle", () => { if (d.open) ensure(); });
+  return d;
+}
+
+function copyBtn(getText) {
+  const b = h("button", { class: "copy", title: "Copy" }, "copy");
+  b.addEventListener("click", e => {
+    e.preventDefault(); e.stopPropagation();
+    const text = typeof getText === "function" ? getText() : getText;
+    navigator.clipboard.writeText(text).then(() => (b.textContent = "copied"), () => (b.textContent = "copy failed"));
+    setTimeout(() => (b.textContent = "copy"), 1200);
+  });
+  return b;
+}
+
+// ---------- text and JSON ----------
+const MAX_LINES = 20, MAX_CHARS = 1500, PREVIEW_LINES = 10, PREVIEW_CHARS = 800;
+
+function textView(str, cls = "text") {
+  str = String(str ?? "");
+  const el = h("div", { class: cls });
+  const lines = str.split("\n");
+  if (lines.length <= MAX_LINES && str.length <= MAX_CHARS) { el.textContent = str; return el; }
+  let preview = lines.slice(0, PREVIEW_LINES).join("\n");
+  if (preview.length > PREVIEW_CHARS) preview = preview.slice(0, PREVIEW_CHARS);
+  const size = lines.length > 1 ? `${lines.length} lines` : `${str.length.toLocaleString()} chars`;
+  const body = h("span", null, preview + " …");
+  const btn = h("button", { class: "more" }, `show all (${size})`);
+  let full = false;
+  btn.onclick = () => {
+    full = !full;
+    body.textContent = full ? str : preview + " …";
+    btn.textContent = full ? "show less" : `show all (${size})`;
+  };
+  el.append(body, h("div", null, btn));
+  return el;
+}
+
+function jsonView(value) {
+  return h("div", { class: "json" }, jsonNode(value, 0));
+}
+
+function jsonNode(v, depth) {
+  if (v === null || v === undefined) return h("span", { class: "j-lit" }, "null");
+  if (typeof v === "string") {
+    // Strings with newlines are shown with real line breaks, not \n.
+    if (v.includes("\n") || v.length > 200) return textView(v);
+    return h("span", { class: "j-str" }, JSON.stringify(v));
+  }
+  if (typeof v === "number") return h("span", { class: "j-num" }, String(v));
+  if (typeof v === "boolean") return h("span", { class: "j-lit" }, String(v));
+  const isArr = Array.isArray(v);
+  const entries = isArr ? v.map((x, i) => [i, x]) : Object.entries(v);
+  const [open, close] = isArr ? ["[", "]"] : ["{", "}"];
+  if (!entries.length) return h("span", { class: "j-punct" }, open + close);
+  const noun = isArr ? (entries.length === 1 ? "item" : "items") : (entries.length === 1 ? "key" : "keys");
+  return lazyDetails(
+    h("span", { class: "j-punct" }, `${open} ${entries.length} ${noun} ${close}`),
+    () => h("div", { class: "j-children" }, entries.map(([k, x]) => h("div", { class: "j-row" },
+      isArr ? null : [h("span", { class: "j-key" }, k), h("span", { class: "j-punct" }, ": ")],
+      jsonNode(x, depth + 1)))),
+    { open: depth < 2, cls: "j-node" });
+}
+
+function pretty(v) { return typeof v === "string" ? v : JSON.stringify(v, null, 2); }
+
+// ---------- message blocks ----------
+// User text that the harness injected rather than you typing it.
+const SYSTEM_TAG = /^\s*<(system-reminder|command-name|command-message|command-args|local-command-\w+|user-prompt-submit-hook)\b/;
+
+function firstLine(s, n = 140) { s = String(s ?? "").trim().replace(/\s+/g, " "); return s.length > n ? s.slice(0, n) + "…" : s; }
+
+function shortInput(input) {
+  if (input == null) return "";
+  if (typeof input === "string") return firstLine(input, 60);
+  const vals = Object.values(input);
+  const str = vals.find(x => typeof x === "string");
+  return firstLine(str ?? JSON.stringify(input), 60);
+}
+
+// kind: you | claude | call | result | error | sys | thinking
+function block(kind, label, body, { copy, extra, collapsed = false, preview } = {}) {
+  const head = [h("span", { class: "tag" }, label), extra,
+    collapsed && preview ? h("span", { class: "preview" }, preview) : h("span", { class: "spacer" }),
+    copy != null ? copyBtn(copy) : null];
+  if (collapsed) {
+    const d = lazyDetails(head, () => h("div", { class: "block-body" }, typeof body === "function" ? body() : body),
+      { cls: `block fold k-${kind}`, summaryCls: "block-head" });
+    return d;
+  }
+  return h("div", { class: `block k-${kind}` }, h("div", { class: "block-head" }, head),
+    h("div", { class: "block-body" }, typeof body === "function" ? body() : body));
+}
+
+function renderBlock(b, role, opts = {}) {
+  if (typeof b === "string") b = { type: "text", text: b };
+  switch (b.type) {
+    case "text":
+      if (role === "user" && SYSTEM_TAG.test(b.text))
+        return block("sys", "SYSTEM", () => textView(b.text), { copy: b.text, collapsed: true, preview: firstLine(b.text) });
+      return role === "assistant"
+        ? block("claude", "CLAUDE", textView(b.text), { copy: b.text, extra: opts.streaming ? h("span", { class: "cursor" }) : null })
+        : block("you", "YOU", textView(b.text), { copy: b.text });
+    case "thinking":
+      return block("thinking", "THINKING", () => textView(b.thinking), { copy: b.thinking, collapsed: true, preview: firstLine(b.thinking) });
+    case "redacted_thinking":
+      return block("thinking", "THINKING", h("span", { class: "muted" }, "(redacted)"), { collapsed: true, preview: "(redacted)" });
+    case "tool_use":
+    case "server_tool_use":
+      return renderCall(b, opts);
+    case "tool_result":
+      return renderResult(b, opts);
+    case "image":
+      return block(role === "assistant" ? "claude" : "you", "IMAGE", h("span", { class: "muted" }, `[${b.source?.media_type || "image"}]`));
+    default:
+      if (/_tool_result$/.test(b.type || "")) // server tools: web_search_tool_result, ...
+        return block("result", `RESULT · ${b.type.replace(/_tool_result$/, "")}`, () => jsonView(b.content), { collapsed: true, copy: () => pretty(b.content) });
+      return block("sys", (b.type || "block").toUpperCase(), () => jsonView(b), { collapsed: true, copy: () => pretty(b) });
+  }
+}
+
+function renderCall(b, { slot = false } = {}) {
+  const body = typeof b.input === "string" ? textView(b.input) : jsonView(b.input ?? {});
+  const el = block("call", `CALL · ${b.name}`, body, { copy: () => pretty(b.input) });
+  if (slot) {
+    // This is the call's home: its result appears right under it once the next request carries it.
+    const entry = calls.get(b.id) || { name: b.name, input: b.input };
+    calls.set(b.id, { ...entry, homeEl: el });
+    el.dataset.call = b.id;
+    const s = h("div", { class: "slot", "data-slot": b.id });
+    fillSlot(s, b.id);
+    el.append(s);
+  }
+  return el;
+}
+
+function resultText(c) {
+  if (c == null) return "";
+  if (typeof c === "string") return c;
+  if (Array.isArray(c)) return c.map(x => x.type === "text" ? x.text : pretty(x)).join("\n");
+  return pretty(c);
+}
+
+function resultContent(c) {
+  if (c == null || c === "" || (Array.isArray(c) && !c.length)) return h("span", { class: "muted" }, "(empty)");
+  if (typeof c === "string") return textView(c);
+  if (Array.isArray(c)) return c.map(x =>
+    x.type === "text" ? textView(x.text)
+    : x.type === "image" ? h("div", { class: "muted" }, `[${x.source?.media_type || "image"}]`)
+    : jsonView(x));
+  return jsonView(c);
+}
+
+function renderResult(b, { inSlot = false } = {}) {
+  const call = calls.get(b.tool_use_id);
+  const label = (b.is_error ? "ERROR" : "RESULT") + (call ? ` · ${call.name}` : "");
+  const answers = !inSlot && call
+    ? h("a", { class: "answers", href: "#", onclick: e => { e.preventDefault(); jumpToCall(b.tool_use_id); } },
+        `↖ answers ${call.name}(${shortInput(call.input)})`)
+    : null;
+  return block(b.is_error ? "error" : "result", label, [answers, resultContent(b.content)], { copy: () => resultText(b.content) });
+}
+
+function fillSlot(s, id) {
+  const r = results.get(id);
+  s.replaceChildren(r ? renderResult(r, { inSlot: true }) : h("div", { class: "awaiting" }, "awaiting result…"));
+}
+
+function jumpToCall(id) {
+  const call = calls.get(id);
+  let el = call?.homeEl;
+  if (!el || !el.isConnected) el = exchanges.get(call?.exchangeId)?.el;
+  if (!el || !el.isConnected) return;
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.add("flash");
+  setTimeout(() => el.classList.remove("flash"), 1500);
+}
+
+function renderMessage(m, opts) {
+  const blocks = typeof m.content === "string" ? [{ type: "text", text: m.content }] : (m.content || []);
+  return h("div", { class: "msg" }, blocks.map(b => renderBlock(b, m.role, opts)));
+}
+
+// ---------- state ----------
+const exchanges = new Map();   // id -> {id, time, request, response, live?, el?}
+const order = [];              // ids, ascending
+const calls = new Map();       // tool_use_id -> {name, input, exchangeId, homeEl?}
+const results = new Map();     // tool_use_id -> tool_result block
+let clearedUpTo = 0, paused = false, pending = [], newCount = 0, lastSeq = 0;
+
+const list = document.getElementById("list");
+const filterBox = document.getElementById("filter");
+const hideOther = document.getElementById("hideOther");
+
+function isMessages(ex) {
+  return ex.request.method === "POST" && /^\/v1\/messages(\?|$)/.test(ex.request.path || "");
+}
+
+function registerMessages(msgs, xid) {
+  for (const m of msgs || []) {
+    if (!Array.isArray(m.content)) continue;
+    for (const b of m.content) {
+      if ((b.type === "tool_use" || b.type === "server_tool_use") && !calls.has(b.id))
+        calls.set(b.id, { name: b.name, input: b.input, exchangeId: xid });
+      else if (b.type === "tool_result" && !results.has(b.tool_use_id)) {
+        results.set(b.tool_use_id, b);
+        withAnchor(() => document.querySelectorAll(`[data-slot="${CSS.escape(b.tool_use_id)}"]`).forEach(s => fillSlot(s, b.tool_use_id)));
+      }
+    }
+  }
+}
+
+function registerReply(ex) {
+  const content = ex.response?.body?.content;
+  if (!Array.isArray(content)) return;
+  for (const b of content)
+    if (b.type === "tool_use" || b.type === "server_tool_use")
+      calls.set(b.id, { ...calls.get(b.id), name: b.name, input: b.input, exchangeId: ex.id });
+}
+
+// Strip cache_control: Claude Code moves those markers around between requests.
+function canon(v) { return JSON.stringify(v ?? null, (k, val) => (k === "cache_control" ? undefined : val)); }
+
+function previousSameModel(ex) {
+  const model = ex.request.body?.model;
+  for (let i = order.indexOf(ex.id) - 1; i >= 0; i--) {
+    const p = exchanges.get(order[i]);
+    if (isMessages(p) && p.request.body?.model === model) return p;
+  }
+  return null;
+}
+
+function searchText(ex) {
+  if (ex.search == null) ex.search = JSON.stringify([ex.request.body, ex.response?.body ?? null, ex.request.path]).toLowerCase();
+  return ex.search;
+}
+
+// ---------- card ----------
+function fmtTokens(n) { return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n); }
+
+function renderHead(ex) {
+  const body = ex.request.body || {};
+  const r = ex.response;
+  const parts = [h("span", { class: "id" }, `#${ex.id}`),
+    h("span", { title: ex.time }, (ex.time || "").slice(11, 19))];
+  if (isMessages(ex)) parts.push(h("span", { class: "model" }, body.model || "?"));
+  else parts.push(h("span", { class: "model" }, `${ex.request.method} ${ex.request.path}`));
+  if (!r) parts.push(h("span", null, h("span", { class: "dot" }), ex.live ? " streaming" : " waiting"));
+  else {
+    if (r.status) parts.push(h("span", { class: r.status >= 400 ? "bad" : null }, `${r.status} ${r.reason || ""}`.trim()));
+    if (r.error) parts.push(h("span", { class: "bad" }, r.status ? "interrupted" : "unreachable"));
+    if (r.duration_ms != null) parts.push(h("span", null, (r.duration_ms / 1000).toFixed(1) + "s"));
+    const u = r.body?.usage;
+    if (u) {
+      const cached = (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+      const input = (u.input_tokens || 0) + cached;
+      parts.push(h("span", null, `in ${fmtTokens(input)}${cached ? ` (${fmtTokens(u.cache_read_input_tokens || 0)} cached)` : ""} · out ${fmtTokens(u.output_tokens || 0)}`));
+    }
+    if (r.body?.stop_reason) parts.push(h("span", null, r.body.stop_reason));
+  }
+  if (isMessages(ex) && body.stream === false) parts.push(h("span", null, "non-streaming"));
+  return h("div", { class: "head" }, parts);
+}
+
+function sectionTitle(name, meta, changed) {
+  return [h("span", { class: "sec-name" }, name), meta ? h("span", { class: "sec-meta" }, meta) : null,
+    changed ? h("span", { class: "badge" }, "changed") : null];
+}
+
+function systemParts(sys) {
+  return typeof sys === "string" ? [sys] : (sys || []).map(b => (b.type === "text" ? b.text : pretty(b)));
+}
+
+function renderSystem(sys) {
+  return systemParts(sys).map((text, i, all) => h("div", { class: "sys-part" },
+    h("div", { class: "part-head" }, all.length > 1 ? `part ${i + 1} of ${all.length}` : "", copyBtn(text)),
+    textView(text)));
+}
+
+function renderTools(tools) {
+  return tools.map(t => lazyDetails(
+    [h("span", { class: "tool-name" }, t.name || t.type), h("span", { class: "preview" }, firstLine(t.description || t.type || "", 120))],
+    () => h("div", { class: "tool-body" },
+      t.description ? [h("div", { class: "part-head" }, "description", copyBtn(t.description)), textView(t.description)] : null,
+      h("div", { class: "raw-label" }, t.input_schema ? "input schema" : "definition"),
+      jsonView(t.input_schema || t)),
+    { cls: "tool" }));
+}
+
+function renderCard(ex) {
+  const card = h("article", { class: "card", id: `x${ex.id}` });
+  ex.el = card;
+  ex.headEl = renderHead(ex);
+  card.append(ex.headEl);
+  ex.replyEl = h("div", { class: "section-body" });
+
+  if (isMessages(ex)) {
+    const body = ex.request.body || {};
+    const prev = previousSameModel(ex);
+    const prevBody = prev?.request.body || {};
+    if (body.system) {
+      const chars = systemParts(body.system).join("").length;
+      card.append(lazyDetails(sectionTitle("System prompt", `${chars.toLocaleString()} chars`, prev && canon(prevBody.system) !== canon(body.system)),
+        () => h("div", { class: "section-body" }, renderSystem(body.system))));
+    }
+    if (body.tools?.length)
+      card.append(lazyDetails(sectionTitle("Tools", `${body.tools.length} tool${body.tools.length === 1 ? "" : "s"}`, prev && canon(prevBody.tools) !== canon(body.tools)),
+        () => h("div", { class: "section-body" }, renderTools(body.tools))));
+
+    // New this turn = everything after the last assistant message (your prompt, or the tool results).
+    const msgs = body.messages || [];
+    let k = msgs.length;
+    while (k > 0 && msgs[k - 1].role !== "assistant") k--;
+    const earlier = msgs.slice(0, k), fresh = msgs.slice(k);
+    if (earlier.length)
+      card.append(lazyDetails(sectionTitle("Conversation so far", `${earlier.length} earlier message${earlier.length === 1 ? "" : "s"}`),
+        () => h("div", { class: "section-body" }, earlier.map(m => renderMessage(m, {})))));
+    card.append(lazyDetails(sectionTitle("New this turn", fresh.length ? null : "nothing new"),
+      () => h("div", { class: "section-body" }, fresh.map(m => renderMessage(m, {}))), { open: true, cls: "section main" }));
+  } else if (ex.request.body != null) {
+    card.append(lazyDetails(sectionTitle("Request body"), () => h("div", { class: "section-body" }, jsonView(ex.request.body)), { open: true }));
+  }
+
+  const replyDetails = h("details", { class: "section main", open: true }, h("summary", null, sectionTitle(isMessages(ex) ? "Reply" : "Response")), ex.replyEl);
+  card.append(replyDetails);
+  renderReply(ex);
+
+  card.append(lazyDetails(sectionTitle("Raw"), () => h("div", { class: "section-body" },
+    h("div", { class: "raw-label" }, "request headers"), jsonView(ex.request.headers),
+    h("div", { class: "raw-label" }, "request body"), jsonView(ex.request.body),
+    h("div", { class: "raw-label" }, "response"), ex.response ? jsonView(ex.response) : h("span", { class: "muted" }, "(not finished)")),
+    { rebuild: true }));
+  return card;
+}
+
+function renderReply(ex) {
+  const el = ex.replyEl;
+  if (!el) return;
+  const r = ex.response;
+  let content;
+  if (r) {
+    const b = r.body;
+    content = [];
+    if (r.error && !r.status) content.push(block("error", "ERROR", textView(r.error)));
+    else if (b && typeof b === "object" && Array.isArray(b.content)) {
+      content.push(renderMessage({ role: "assistant", content: b.content }, { slot: true }));
+      if (!b.content.length) content.push(h("span", { class: "muted" }, "(empty reply)"));
+    } else if (b?.type === "error" || (b && typeof b === "object" && b.error && !b.content)) {
+      const e = b.error || {};
+      content.push(block("error", `ERROR · ${e.type || r.status}`, [e.message ? textView(e.message) : null, jsonView(b)]));
+    } else if (b != null) content.push(typeof b === "string" ? textView(b) : jsonView(b));
+    else if (!r.error) content.push(h("span", { class: "muted" }, "(no body)"));
+    if (b?.error && Array.isArray(b.content)) content.push(block("error", "ERROR", jsonView(b.error)));
+    if (r.error && r.status) content.push(block("error", "ERROR", textView(r.error)));
+  } else if (ex.live?.msg) {
+    content = renderMessage({ role: "assistant", content: ex.live.msg.content }, { streaming: true });
+  } else {
+    content = h("span", { class: "awaiting" }, "waiting for reply…");
+  }
+  el.replaceChildren(...[content].flat());
+}
+
+function scheduleReply(ex) {
+  if (ex.raf) return;
+  ex.raf = requestAnimationFrame(() => {
+    ex.raf = 0;
+    withAnchor(() => {
+      renderReply(ex);
+      const head = renderHead(ex);
+      ex.headEl?.replaceWith(head);
+      ex.headEl = head;
+    });
+  });
+}
+
+// Mirror of StreamAssembler in proxy.py: shows the reply growing while it streams.
+class Assembler {
+  constructor() { this.buf = ""; this.data = []; this.msg = null; }
+  feed(text) {
+    this.buf += text;
+    const lines = this.buf.split("\n");
+    this.buf = lines.pop();
+    for (let line of lines) {
+      line = line.replace(/\r$/, "");
+      if (line.startsWith("data:")) this.data.push(line.slice(5).replace(/^ /, ""));
+      else if (!line && this.data.length) { this.event(this.data.join("\n")); this.data = []; }
+    }
+  }
+  event(raw) {
+    let ev;
+    try { ev = JSON.parse(raw); } catch { return; }
+    try { this.apply(ev); } catch { /* ignore malformed events */ }
+  }
+  apply(ev) {
+    if (ev.type === "message_start") { this.msg = { ...ev.message, content: [...(ev.message.content || [])] }; return; }
+    const msg = this.msg;
+    if (!msg) return;
+    if (ev.type === "content_block_start") {
+      const b = { ...ev.content_block };
+      if ("input" in b) b.input = ""; // grows as a JSON string while streaming
+      msg.content[ev.index] = b;
+    } else if (ev.type === "content_block_delta") {
+      const b = msg.content[ev.index], d = ev.delta;
+      if (d.type === "text_delta") b.text = (b.text || "") + d.text;
+      else if (d.type === "input_json_delta") b.input = (b.input || "") + d.partial_json;
+      else if (d.type === "thinking_delta") b.thinking = (b.thinking || "") + d.thinking;
+    } else if (ev.type === "content_block_stop") {
+      const b = msg.content[ev.index];
+      if (typeof b?.input === "string") { try { b.input = b.input ? JSON.parse(b.input) : {}; } catch { /* keep the raw text */ } }
+    }
+  }
+}
+
+// ---------- list management ----------
+// Keep what you are looking at in place when content above it changes.
+function withAnchor(fn) {
+  if (window.scrollY < 40) return fn();
+  let anchor = null, top = 0;
+  for (const c of list.children) {
+    const r = c.getBoundingClientRect();
+    if (r.bottom > 70) { anchor = c; top = r.top; break; }
+  }
+  fn();
+  if (anchor?.isConnected) window.scrollBy(0, anchor.getBoundingClientRect().top - top);
+}
+
+function applyVisibility(ex) {
+  if (!ex.el) return;
+  const f = filterBox.value.trim().toLowerCase();
+  ex.el.hidden = (hideOther.checked && !isMessages(ex)) || (f !== "" && !searchText(ex).includes(f));
+}
+
+function updateEmpty() {
+  document.getElementById("empty").hidden = [...list.children].some(c => !c.hidden);
+}
+
+function insertCard(ex) {
+  const card = renderCard(ex);
+  applyVisibility(ex);
+  withAnchor(() => {
+    let before = null;
+    for (const c of list.children) if (+c.id.slice(1) < ex.id) { before = c; break; }
+    list.insertBefore(card, before);
+  });
+  if (window.scrollY > 40 && !card.hidden) { newCount++; showPill(); }
+  updateEmpty();
+}
+
+function addExchange(ex) {
+  if (exchanges.has(ex.id)) return;
+  exchanges.set(ex.id, ex);
+  let i = order.length;
+  while (i > 0 && order[i - 1] > ex.id) i--;
+  order.splice(i, 0, ex.id);
+  if (isMessages(ex)) registerMessages(ex.request.body?.messages, ex.id);
+  if (ex.stream) { ex.live = new Assembler(); ex.live.feed(ex.stream); delete ex.stream; }
+  if (ex.response) registerReply(ex);
+  if (ex.id > clearedUpTo) insertCard(ex);
+}
+
+function finishExchange(id, response) {
+  const ex = exchanges.get(id);
+  if (!ex) return;
+  ex.response = response;
+  ex.live = null;
+  ex.search = null;
+  registerReply(ex);
+  withAnchor(() => {
+    renderReply(ex);
+    const head = renderHead(ex);
+    ex.headEl?.replaceWith(head);
+    ex.headEl = head;
+  });
+  applyVisibility(ex);
+  updateEmpty();
+}
+
+function handle(msg) {
+  switch (msg.type) {
+    case "reset": location.reload(); break;
+    case "request": addExchange({ id: msg.id, time: msg.time, request: msg.request, response: null }); break;
+    case "chunk": {
+      const ex = exchanges.get(msg.id);
+      if (!ex || ex.response) break;
+      (ex.live ||= new Assembler()).feed(msg.data);
+      scheduleReply(ex);
+      break;
+    }
+    case "response": finishExchange(msg.id, msg.response); break;
+  }
+}
+
+// ---------- top bar ----------
+const pill = document.getElementById("pill");
+function showPill() { pill.textContent = `${newCount} new ↑`; pill.hidden = false; }
+pill.onclick = () => window.scrollTo({ top: 0, behavior: "smooth" });
+window.addEventListener("scroll", () => { if (window.scrollY < 40) { newCount = 0; pill.hidden = true; } }, { passive: true });
+
+let filterTimer;
+filterBox.addEventListener("input", () => {
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(() => { exchanges.forEach(applyVisibility); updateEmpty(); }, 150);
+});
+hideOther.addEventListener("change", () => { exchanges.forEach(applyVisibility); updateEmpty(); });
+
+const pauseBtn = document.getElementById("pause");
+pauseBtn.onclick = () => {
+  paused = !paused;
+  pauseBtn.classList.toggle("on", paused);
+  pauseBtn.textContent = paused ? "Resume" : "Pause";
+  if (!paused) { const queued = pending; pending = []; queued.forEach(handle); }
+};
+function updatePauseLabel() { if (paused) pauseBtn.textContent = `Resume (${pending.length})`; }
+
+document.getElementById("clear").onclick = () => {
+  clearedUpTo = order.length ? order[order.length - 1] : 0;
+  exchanges.forEach(ex => { ex.el = ex.headEl = ex.replyEl = null; });
+  list.replaceChildren();
+  newCount = 0; pill.hidden = true;
+  updateEmpty();
+};
+
+const conn = document.getElementById("conn");
+function setConn(state, text) { conn.className = "conn " + state; conn.textContent = text; }
+
+// ---------- live connection ----------
+async function start() {
+  document.querySelector("#empty code").textContent = `ANTHROPIC_BASE_URL=${location.origin} claude`;
+  try {
+    const data = await (await fetch("/__history")).json();
+    data.exchanges.forEach(addExchange);
+    lastSeq = data.seq;
+  } catch {
+    setConn("down", "proxy not reachable, retrying…");
+    setTimeout(start, 2000);
+    return;
+  }
+  updateEmpty();
+  connect();
+}
+
+function connect() {
+  const es = new EventSource(`/__events?since=${lastSeq}`);
+  es.onopen = () => setConn("live", "live");
+  es.onerror = () => {
+    setConn("down", "reconnecting…");
+    if (es.readyState === EventSource.CLOSED) setTimeout(connect, 2000);
+  };
+  es.onmessage = e => {
+    lastSeq = Number(e.lastEventId) || lastSeq;
+    const msg = JSON.parse(e.data);
+    if (paused && msg.type !== "reset") { pending.push(msg); updatePauseLabel(); }
+    else handle(msg);
+  };
+}
+
+start();
+</script>
+</body>
+</html>
