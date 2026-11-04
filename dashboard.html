@@ -73,6 +73,13 @@ main { max-width: 1100px; margin: 0 auto; padding: 16px; }
 .head .sess:hover { color: var(--fg); text-decoration: underline; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--call); animation: pulse 1s infinite alternate; }
 @keyframes pulse { from { opacity: .25; } to { opacity: 1; } }
+.head .cost { color: var(--fg); cursor: help; }
+.ctx { display: inline-flex; align-items: center; gap: 5px; cursor: help; }
+.ctx-bar { display: inline-block; width: 44px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.ctx-bar > i { display: block; height: 100%; background: var(--claude); }
+.ctx.warn .ctx-bar > i { background: var(--call); }
+.ctx.full .ctx-bar > i { background: var(--error); }
+.ctx.full { color: var(--error); }
 
 details > summary { cursor: pointer; list-style: none; }
 details > summary::-webkit-details-marker { display: none; }
@@ -383,7 +390,7 @@ const exchanges = new Map();   // id -> {id, time, request, response, live?, el?
 const order = [];              // ids, ascending
 const calls = new Map();       // tool_use_id -> {name, input, exchangeId, homeEl?}
 const results = new Map();     // tool_use_id -> tool_result block
-const sessions = new Map();    // session_id -> {id, count, first, last, titles: Map(first prompt -> count)}
+const sessions = new Map();    // session_id -> {id, count, cost, first, last, titles: Map(first prompt -> count)}
 let clearedUpTo = 0, paused = false, pending = [], newCount = 0, lastSeq = 0;
 let selected = null;           // session_id shown alone, or null for all
 try { selected = localStorage.getItem("agentTraffic.session") || null; } catch { /* storage unavailable */ }
@@ -416,6 +423,96 @@ function registerReply(ex) {
   for (const b of content)
     if (b.type === "tool_use" || b.type === "server_tool_use")
       calls.set(b.id, { ...calls.get(b.id), name: b.name, input: b.input, exchangeId: ex.id });
+}
+
+// ---------- cost and context ----------
+// USD per million tokens, from platform.claude.com/docs/en/about-claude/pricing (read 2026-11-04).
+// read = cache-hit price as a fraction of input; cache writes cost 1.25x input (5 min) or 2x (1 hour).
+// ctx = context window. fast = [input, output] in fast mode. over = higher prices above a prompt size.
+const PRICES = [
+  { id: "claude-fable-5-1",  in: 10,  out: 50,  read: 0.025, ctx: 1e6 },
+  { id: "claude-mythos-5-1", in: 10,  out: 50,  read: 0.025, ctx: 1e6 },
+  { id: "claude-fable-5",    in: 10,  out: 50,  read: 0.1,   ctx: 1e6 },
+  { id: "claude-mythos-5",   in: 10,  out: 50,  read: 0.1,   ctx: 1e6 },
+  { id: "claude-opus-5-5",   in: 4,   out: 20,  read: 0.05,  ctx: 1e6, fast: [8, 40] },
+  { id: "claude-opus-5",     in: 5,   out: 25,  read: 0.1,   ctx: 1e6, fast: [10, 50] },
+  { id: "claude-opus-4-8",   in: 5,   out: 25,  read: 0.1,   ctx: 1e6, fast: [10, 50] },
+  { id: "claude-opus-4-7",   in: 5,   out: 25,  read: 0.1,   ctx: 1e6 },
+  { id: "claude-opus-4-6",   in: 5,   out: 25,  read: 0.1,   ctx: 1e6 },
+  { id: "claude-opus-4-5",   in: 5,   out: 25,  read: 0.1,   ctx: 2e5 },
+  { id: "claude-opus-4-1",   in: 15,  out: 75,  read: 0.1,   ctx: 2e5 },
+  { id: "claude-opus-4",     in: 15,  out: 75,  read: 0.1,   ctx: 2e5 },
+  { id: "claude-sonnet-5-5", in: 2,   out: 10,  read: 0.05,  ctx: 1e6 },
+  { id: "claude-sonnet-5",   in: 2,   out: 10,  read: 0.1,   ctx: 1e6 },
+  { id: "claude-sonnet-4-6", in: 3,   out: 15,  read: 0.1,   ctx: 1e6 },
+  { id: "claude-sonnet-4-5", in: 3,   out: 15,  read: 0.1,   ctx: 2e5 },
+  { id: "claude-sonnet-4",   in: 3,   out: 15,  read: 0.1,   ctx: 2e5 },
+  { id: "claude-haiku-5-5",  in: 0.1, out: 0.5, read: 0.1,   ctx: 1e6, over: { at: 100000, in: 0.5, out: 2.5 } },
+  { id: "claude-haiku-4-5",  in: 1,   out: 5,   read: 0.1,   ctx: 2e5 },
+  { id: "claude-3-5-haiku",  in: 0.8, out: 4,   read: 0.1,   ctx: 2e5 },
+].sort((a, b) => b.id.length - a.id.length); // longest prefix first: opus-5-5 before opus-5
+
+function priceFor(model) {
+  if (typeof model !== "string") return null;
+  const m = model.slice(Math.max(0, model.indexOf("claude-"))); // drop "anthropic." etc.; "[1m]" or dates may follow
+  return PRICES.find(p => m.startsWith(p.id)) || null;
+}
+
+function promptTokens(u) {
+  return (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+}
+
+// Estimated API price of one reply, or null for an unknown model.
+function costOf(model, u) {
+  const p = priceFor(model);
+  if (!p || !u) return null;
+  const cc = u.cache_creation;
+  const w1 = cc ? cc.ephemeral_1h_input_tokens || 0 : 0;
+  const w5 = cc ? cc.ephemeral_5m_input_tokens || 0 : u.cache_creation_input_tokens || 0;
+  let rin = p.in, rout = p.out;
+  if (p.over && promptTokens(u) > p.over.at) { rin = p.over.in; rout = p.over.out; }
+  if (u.speed === "fast" && p.fast) [rin, rout] = p.fast;
+  const geo = u.inference_geo === "us" ? 1.1 : 1;
+  const parts = [["input", u.input_tokens, rin], ["cache write 5m", w5, rin * 1.25], ["cache write 1h", w1, rin * 2],
+    ["cache read", u.cache_read_input_tokens, rin * p.read], ["output", u.output_tokens, rout]]
+    .filter(([, n]) => n > 0).map(([name, n, rate]) => ({ name, n, rate: rate * geo, usd: (n * rate * geo) / 1e6 }));
+  return { total: parts.reduce((a, x) => a + x.usd, 0), parts, fast: u.speed === "fast" && !!p.fast, geo };
+}
+
+function fmtUsd(v) { return "$" + (v < 0.01 ? v.toFixed(4) : v < 1 ? v.toFixed(3) : v.toFixed(2)); }
+
+function costView(model, u) {
+  const c = costOf(model, u);
+  if (!c) return h("span", { title: `no price known for ${model}` }, "$ ?");
+  const lines = c.parts.map(x => `${x.name}: ${x.n.toLocaleString()} × $${+x.rate.toFixed(4)}/M = ${fmtUsd(x.usd)}`);
+  if (c.fast) lines.push("fast mode prices");
+  if (c.geo !== 1) lines.push("US-only inference: ×1.1");
+  lines.push("", "Estimate at API prices (tokens only, no server-tool fees).", "A Claude subscription doesn't bill per token.");
+  return h("span", { class: "cost", title: lines.join("\n") }, fmtUsd(c.total));
+}
+
+// How full the context window is: everything sent as the prompt for this request.
+function ctxView(model, u) {
+  const p = priceFor(model);
+  if (!p || !u) return null;
+  const used = promptTokens(u), pct = (used / p.ctx) * 100;
+  return h("span", { class: "ctx" + (pct >= 90 ? " full" : pct >= 70 ? " warn" : ""),
+    title: `prompt: ${used.toLocaleString()} of ${p.ctx.toLocaleString()} tokens in the context window` },
+    h("span", { class: "ctx-bar" }, h("i", { style: `width:${Math.min(100, pct).toFixed(1)}%` })),
+    `${fmtTokens(used)}/${fmtTokens(p.ctx)} · ${pct < 1 ? pct.toFixed(1) : Math.round(pct)}%`);
+}
+
+// Running totals (over the exchanges this page has loaded).
+let totalCost = 0;
+function countCost(ex) {
+  if (ex.counted || !ex.response) return;
+  const c = costOf(ex.request.body?.model, ex.response.body?.usage);
+  if (!c) return;
+  ex.counted = true;
+  totalCost += c.total;
+  const s = sessions.get(sessionOf(ex));
+  if (s) s.cost += c.total;
+  scheduleSessions();
 }
 
 // ---------- sessions ----------
@@ -451,7 +548,7 @@ function trackSession(ex) {
   const sid = sessionOf(ex);
   if (!sid || !isMessages(ex)) return;
   let s = sessions.get(sid);
-  if (!s) sessions.set(sid, s = { id: sid, count: 0, first: ex.time, last: ex.time, titles: new Map() });
+  if (!s) sessions.set(sid, s = { id: sid, count: 0, cost: 0, first: ex.time, last: ex.time, titles: new Map() });
   s.count++;
   if (ex.time > s.last) s.last = ex.time;
   if (ex.time < s.first) s.first = ex.time;
@@ -478,14 +575,14 @@ function renderSessions() {
   row.hidden = sessions.size === 0;
   const total = [...sessions.values()].reduce((a, s) => a + s.count, 0);
   const chips = [h("button", { class: "chip" + (selected ? "" : " on"), onclick: () => selectSession(null) },
-    h("span", { class: "s-title" }, "All sessions"), h("span", { class: "s-meta" }, String(total)))];
+    h("span", { class: "s-title" }, "All sessions"), h("span", { class: "s-meta" }, `${total} · ${fmtUsd(totalCost)}`))];
   for (const s of [...sessions.values()].sort((a, b) => (a.last < b.last ? 1 : -1)))
     chips.push(h("button", {
       class: "chip" + (selected === s.id ? " on" : ""), style: `--s:${sessionColor(s.id)}`,
-      title: `session ${s.id}\n${s.count} request${s.count === 1 ? "" : "s"}\n${s.first} → ${s.last}`,
+      title: `session ${s.id}\n${s.count} request${s.count === 1 ? "" : "s"}, ~${fmtUsd(s.cost)} at API prices\n${s.first} → ${s.last}`,
       onclick: () => selectSession(selected === s.id ? null : s.id),
     }, h("span", { class: "sdot" }), h("span", { class: "s-title" }, sessionTitle(s)),
-       h("span", { class: "s-meta" }, `${s.count} · ${(s.last || "").slice(11, 16)}`)));
+       h("span", { class: "s-meta" }, `${s.count} · ${fmtUsd(s.cost)} · ${(s.last || "").slice(11, 16)}`)));
   row.replaceChildren(...chips);
 }
 
@@ -528,7 +625,10 @@ function renderHead(ex) {
     onclick: () => selectSession(sid) }, h("span", { class: "sdot" }), sid.slice(0, 8)));
   if (isMessages(ex)) parts.push(h("span", { class: "model" }, body.model || "?"));
   else parts.push(h("span", { class: "model" }, `${ex.request.method} ${ex.request.path}`));
-  if (!r) parts.push(h("span", null, h("span", { class: "dot" }), ex.live ? " streaming" : " waiting"));
+  if (!r) {
+    parts.push(h("span", null, h("span", { class: "dot" }), ex.live ? " streaming" : " waiting"));
+    if (ex.live?.msg?.usage) parts.push(ctxView(body.model, ex.live.msg.usage)); // known from message_start
+  }
   else {
     if (r.status) parts.push(h("span", { class: r.status >= 400 ? "bad" : null }, `${r.status} ${r.reason || ""}`.trim()));
     if (r.error) parts.push(h("span", { class: "bad" }, r.status ? "interrupted" : "unreachable"));
@@ -538,6 +638,7 @@ function renderHead(ex) {
       const cached = (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
       const input = (u.input_tokens || 0) + cached;
       parts.push(h("span", null, `in ${fmtTokens(input)}${cached ? ` (${fmtTokens(u.cache_read_input_tokens || 0)} cached)` : ""} · out ${fmtTokens(u.output_tokens || 0)}`));
+      if (isMessages(ex)) parts.push(costView(body.model, u), ctxView(body.model, u));
     }
     if (r.body?.stop_reason) parts.push(h("span", null, r.body.stop_reason));
   }
@@ -740,7 +841,7 @@ function addExchange(ex) {
   if (isMessages(ex)) registerMessages(ex.request.body?.messages, ex.id);
   trackSession(ex);
   if (ex.stream) { ex.live = new Assembler(); ex.live.feed(ex.stream); delete ex.stream; }
-  if (ex.response) registerReply(ex);
+  if (ex.response) { registerReply(ex); countCost(ex); }
   if (ex.id > clearedUpTo) insertCard(ex);
 }
 
@@ -751,6 +852,7 @@ function finishExchange(id, response) {
   ex.live = null;
   ex.search = null;
   registerReply(ex);
+  countCost(ex);
   withAnchor(() => {
     renderReply(ex);
     const head = renderHead(ex);

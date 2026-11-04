@@ -258,7 +258,10 @@ Each card has a 4px left edge in its session's color (the line color if it has n
   (status but `error`) in red; duration in seconds with one decimal;
   `in X (Y cached) · out Z`, where X = input + cache-read + cache-creation tokens,
   Y = cache-read tokens (the bracket is omitted when nothing is cached), numbers ≥ 1000
-  shown as `1.2k` (no decimal from 10k up); `stop_reason`;
+  shown as `1.2k` (no decimal from 10k up);
+- for message requests: the estimated cost and the context bar (see Cost and context);
+  while streaming, the context bar alone, from the `usage` in `message_start`;
+- `stop_reason`;
 - "non-streaming" if the request body has `stream: false`.
 
 **Sections of a message request**, separated by lines; each has a ▸/▾ marker, a bold
@@ -307,8 +310,10 @@ one). Its id comes from the request body's `metadata.user_id`: a JSON string wit
 
 - **Session row** (in the top bar): an "All sessions" chip with the total, then one chip
   per session, most recently active first: a colored dot, the title, and
-  `<message requests> · HH:MM` of the last activity. The tooltip shows the full id, the
-  count and the first → last time.
+  `<message requests> · <estimated cost> · HH:MM` of the last activity. The "All
+  sessions" chip shows the total requests and total cost. The tooltip shows the full id,
+  the count, the cost and the first → last time. Totals cover the exchanges the page has
+  loaded (the last 200 from the log plus live ones).
 - **Title**: the most common opening prompt (first `YOU` text of the first user message,
   70 chars) among the session's requests. Every turn repeats the conversation's opening
   prompt, so one-off side calls such as the startup `quota` check don't win. Falls back
@@ -319,6 +324,39 @@ one). Its id comes from the request body's `metadata.user_id`: a JSON string wit
   filter box and the non-message checkbox) and scrolls to the top; clicking it again, or
   "All sessions", shows everything. The choice is remembered in `localStorage` and
   dropped on load if that session is no longer in the history.
+
+### Cost and context
+
+A price table in the page (USD per million tokens, taken from
+platform.claude.com/docs/en/about-claude/pricing on 2026-11-04) gives, per model id
+prefix: input and output prices, the cache-read price as a fraction of input (0.025x for
+Fable/Mythos 5.1, 0.05x for Opus 5.5 and Sonnet 5.5, 0.1x for the rest), the context
+window, fast-mode prices (Opus 5.5: $8/$40; Opus 5 and 4.8: $10/$50) and Haiku 5.5's
+higher prices for prompts over 100,000 tokens ($0.50/$2.50). A model is matched by the
+longest id prefix (so `claude-opus-5-5` is not priced as `claude-opus-5`), after dropping
+anything before `claude-` (e.g. `anthropic.`); suffixes like `[1m]` or a date are fine.
+
+**Cost of one reply**, from the reply's `usage`:
+
+| Tokens | Price |
+|---|---|
+| `input_tokens` | input |
+| `cache_creation.ephemeral_5m_input_tokens` | 1.25 × input |
+| `cache_creation.ephemeral_1h_input_tokens` | 2 × input |
+| `cache_read_input_tokens` | read fraction × input |
+| `output_tokens` | output |
+
+Without a `cache_creation` split, all `cache_creation_input_tokens` count as 5-minute
+writes. `speed: "fast"` switches to fast-mode prices; `inference_geo: "us"` multiplies
+everything by 1.1. Server-tool fees (e.g. web search) are not included.
+
+- Shown in the header as `$0.0316` (4 decimals under $0.01, 3 under $1, else 2). Its
+  tooltip lists each line (`tokens × $rate/M = $cost`) and says this is an estimate at
+  API prices, which a Claude subscription doesn't bill per token. An unknown model shows
+  `$ ?` with the model name in the tooltip.
+- **Context bar**: prompt size (input + cache read + cache write tokens) out of the
+  model's context window, as a 44px bar plus `166k/1M · 17%`. Green, amber from 70%, red
+  from 90%.
 
 ### Message blocks
 
@@ -451,6 +489,7 @@ are kept as built:
 - The "changed" badge compares with the previous request **to the same model** (and,
   since session grouping was added, in the same session).
 - Session grouping (see Sessions), added after the first build.
+- Cost estimate and context bar (see Cost and context), added after session grouping.
 - Exact colors, fonts and the legend bar (see Look).
 - The page reloads itself when the proxy restarts (`reset` event).
 - Replies are shown growing while they stream; tool input shows as raw text until
@@ -461,4 +500,3 @@ are kept as built:
 ## Open questions (for later)
 
 - Diff view for a changed system prompt or tool list?
-- Cost estimate per request from `usage`?
