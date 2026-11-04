@@ -13,7 +13,6 @@ and **that tool's result**.
 - Parsing other API formats. Only the Anthropic Messages API is understood; anything
   else is shown as pretty-printed JSON or plain text.
 - Accounts, multiple users, remote access. The proxy listens on 127.0.0.1 only.
-- Grouping requests into sessions (possible later; see Open questions).
 
 ## Decisions
 
@@ -237,6 +236,7 @@ Left to right, wrapping on narrow screens:
   is not touched.
 - A legend on its own line: tags `YOU`, `CLAUDE`, `CALL`, `RESULT`, `ERROR`,
   `SYSTEM · THINKING`, in their colors.
+- A session row on its own line (hidden until a session is seen); see Sessions.
 
 When no card is visible, the page shows "No traffic yet. Run
 `ANTHROPIC_BASE_URL=<page origin> claude`."
@@ -245,8 +245,12 @@ When no card is visible, the page shows "No traffic yet. Run
 
 Cards are ordered by id, newest at the top (an out-of-order arrival is inserted in place).
 
+Each card has a 4px left edge in its session's color (the line color if it has no session).
+
 **Header line** (monospace, muted), in order:
 - `#id` (bold), time `HH:MM:SS` (full ISO time as tooltip);
+- session: a dot in the session color plus the first 8 characters of its id; clicking it
+  shows only that session;
 - model, or `METHOD path` for non-message requests;
 - before the reply finishes: a pulsing amber dot with "streaming" (chunks arrived) or
   "waiting";
@@ -276,7 +280,7 @@ name, a muted size note and an optional amber "changed" badge:
    reflects a reply that finished after the card appeared.
 
 The System prompt and Tools sections get the "changed" badge when their content differs
-from the **most recent earlier message request to the same model**, compared as JSON
+from the **most recent earlier message request to the same model in the same session**, compared as JSON
 with every `cache_control` key removed (Claude Code moves those markers between
 requests). Comparing per model keeps Claude Code's side calls to a smaller model, which
 use a different system prompt, from triggering the badge. The first request to a model
@@ -293,6 +297,28 @@ body, then a "Response" section instead of "Reply", then Raw.
 
 Collapsed sections, collapsed blocks and collapsed JSON nodes build their content only
 when first opened, so long sessions stay fast.
+
+### Sessions
+
+A session is one Claude Code conversation (one run of `claude`; `/clear` starts a new
+one). Its id comes from the request body's `metadata.user_id`: a JSON string with a
+`session_id` field, or the older `…_session_<uuid>` form. Requests without one (e.g.
+`count_tokens`, `HEAD`) have no session.
+
+- **Session row** (in the top bar): an "All sessions" chip with the total, then one chip
+  per session, most recently active first: a colored dot, the title, and
+  `<message requests> · HH:MM` of the last activity. The tooltip shows the full id, the
+  count and the first → last time.
+- **Title**: the most common opening prompt (first `YOU` text of the first user message,
+  70 chars) among the session's requests. Every turn repeats the conversation's opening
+  prompt, so one-off side calls such as the startup `quota` check don't win. Falls back
+  to the first 8 characters of the id.
+- **Color**: a hue computed from a hash of the id (`hsl(h 65% 52%)`), the same in both
+  themes.
+- **Selecting**: clicking a chip shows only that session's cards (combined with the
+  filter box and the non-message checkbox) and scrolls to the top; clicking it again, or
+  "All sessions", shows everything. The choice is remembered in `localStorage` and
+  dropped on load if that session is no longer in the history.
 
 ### Message blocks
 
@@ -422,7 +448,9 @@ are kept as built:
 
 - "New this turn" = messages after the last assistant message (replacing a comparison
   with the previous request).
-- The "changed" badge compares with the previous request **to the same model**.
+- The "changed" badge compares with the previous request **to the same model** (and,
+  since session grouping was added, in the same session).
+- Session grouping (see Sessions), added after the first build.
 - Exact colors, fonts and the legend bar (see Look).
 - The page reloads itself when the proxy restarts (`reset` event).
 - Replies are shown growing while they stream; tool input shows as raw text until
@@ -432,6 +460,5 @@ are kept as built:
 
 ## Open questions (for later)
 
-- Group cards by session when several agents run at once?
 - Diff view for a changed system prompt or tool list?
 - Cost estimate per request from `usage`?
