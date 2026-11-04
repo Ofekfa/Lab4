@@ -500,3 +500,79 @@ are kept as built:
 ## Open questions (for later)
 
 - Diff view for a changed system prompt or tool list?
+
+## Usage Meter
+
+Added after the home build. A row in the top bar showing how much of the Claude
+subscription's limits the latest reply says is used, and when each window resets. Built as
+an add-on: all logic lives in two new files, and the existing files only gained the lines
+that load them.
+
+### Files
+
+| File | Role |
+|---|---|
+| `usage_meter.py` | Keeps the latest rate-limit headers; serves `/__usage` and `/__usage-meter.js`. |
+| `usage_meter.js` | The dashboard component (its own CSS, injected at load). |
+
+Lines added to existing files (nothing else in them changed):
+
+- `proxy.py`, between the `Tap` class and `main()`: `import usage_meter` and
+  `usage_meter.install(HUB, Tap)` (after both exist, which avoids a circular import since
+  `proxy.py` runs as `__main__`).
+- `dashboard.html`, before `</body>`: `<script src="/__usage-meter.js"></script>`.
+
+### Source data
+
+Every reply from the API carries undocumented `anthropic-ratelimit-unified-*` headers
+when the agent uses a subscription login, for example:
+
+| Header (after the prefix) | Meaning |
+|---|---|
+| `5h-utilization` / `7d-utilization` | share of the window used, a float 0–1 |
+| `5h-reset` / `7d-reset` | when the window resets, Unix seconds |
+| `status` | `allowed`, `allowed_warning` or `rejected` |
+| `representative-claim` | the window that currently limits you, e.g. `five_hour`, `seven_day` |
+| `reset` | (if present) when a rejected request may be retried, Unix seconds |
+
+Because they are undocumented, every one is optional and unknown extra headers are kept.
+
+### usage_meter.py
+
+- `install(hub, tap_cls)` wraps `hub.finish`: the original runs first, then the response's
+  headers are read. `finish` runs after the reply has been fully passed to the agent, so the
+  traffic is neither changed nor delayed; any error in the meter is swallowed.
+- It keeps every response header whose lowercased name starts with
+  `anthropic-ratelimit-unified-`, replacing the previous set, plus the time seen. A reply
+  without any of them (502, local route, other upstream) keeps the last known values.
+- After a restart, the first `/__usage` request seeds the values from the newest exchange
+  in the hub's loaded history that has them, so the meter isn't empty.
+- It wraps `Tap.dashboard` with two routes; every other path goes to the original method:
+  - `GET /__usage` → `200 application/json`, `{headers: {name: value}, updated: ISO time | null}`.
+  - `GET /__usage-meter.js` → the file, or `500` "usage_meter.js is missing next to proxy.py".
+- The existing routes, events and log are unchanged; the headers were already part of each
+  `response`.
+
+### Dashboard component
+
+- A full-width row appended at the end of the top bar: "Usage", then the 5-hour window,
+  the 7-day window and the limit banner. Polls `/__usage` every 2 s; the countdown ticks
+  every second.
+- **5h**: a 160px bar, `X% used · Y% remaining`, `· resets in 2h 14m 05s`.
+- **7d**: a smaller 70px bar, `X%`, `· resets <weekday HH:MM>`.
+- Bar colors: green below 70%, amber from 70% to 90%, red above 90%.
+- The window named by `representative-claim` (`five…`/`hour` → 5h, `seven…`/`day`/`week`
+  → 7d) is outlined in blue with a "binding" tag.
+- `status: rejected` shows a red banner "Limit reached — resets in X", using `reset`, else
+  the claimed window's reset, else the later of the two.
+- Missing or non-numeric values show "No data yet"; nothing throws. The tooltip lists every
+  rate-limit header from the latest reply and when it arrived.
+
+### Acceptance checks
+
+1. Start the proxy and open the dashboard: the Usage row shows "No data yet" (or the last
+   logged values).
+2. Send one message through the proxy: within 2 s the 5h and 7d bars, percentages and
+   countdown appear, and match the headers in that card's Raw → response.
+3. Everything in the earlier acceptance checks still holds; Claude Code's replies are
+   byte-for-byte what the API sent.

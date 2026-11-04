@@ -387,6 +387,10 @@ class Tap(BaseHTTPRequestHandler):
         HUB.finish(xid, {**response, "duration_ms": elapsed()})
 
 
+import usage_meter  # Usage Meter add-on (see usage_meter.py)
+usage_meter.install(HUB, Tap)
+
+
 def main() -> None:
     global UPSTREAM
     parser = argparse.ArgumentParser(description="Print and forward an agent's API traffic.")
