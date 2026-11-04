@@ -283,11 +283,28 @@ name, a muted size note and an optional amber "changed" badge:
    reflects a reply that finished after the card appeared.
 
 The System prompt and Tools sections get the "changed" badge when their content differs
-from the **most recent earlier message request to the same model in the same session**, compared as JSON
+from the **most recent earlier message request in the same thread**, compared as JSON
 with every `cache_control` key removed (Claude Code moves those markers between
-requests). Comparing per model keeps Claude Code's side calls to a smaller model, which
-use a different system prompt, from triggering the badge. The first request to a model
-never shows the badge.
+requests). A **thread** is one conversation: same session, same model and the same first
+message (compared the same way). Every turn of a conversation repeats its first message,
+while Claude Code's side calls (title generation, the `quota` check, even ones to the
+same model with a tiny system prompt and no tools) and subagents start their own, so
+they don't trigger the badge. The first request of a thread never shows the badge.
+
+**Diff view**: when a section has the badge, opening it shows a "changes since #N" box
+(amber border) above the usual content; `#N` links to that card.
+
+- System prompt: a line diff of all parts joined by newlines. Removed lines are red with
+  `-`, added lines green with `+`, plus 3 lines of context; longer unchanged runs fold
+  into one "⋯ N unchanged lines" row. The head shows `−D +A lines`.
+- Tools (matched by `name`, else `type`): added tools as green `+` rows with a 100-char
+  description preview, removed tools as red `-` rows, and each changed tool as a
+  collapsed `~ name` row (`−D +A lines`) that opens to a line diff of its JSON (indented,
+  `cache_control` removed). The head summarizes "N added, N removed, N changed", or
+  "same tools, new order" when only the order differs.
+- Diff algorithm: trim the common first and last lines, then a longest-common-subsequence
+  line diff of the rest; if that would need more than 1,000,000 cells, the rest is shown
+  as all removed then all added.
 
 **New this turn** = the messages after the **last assistant message** in the request
 (your prompt, or the tool results the agent sends back); everything up to and including
@@ -473,7 +490,8 @@ matched by id:
 3. The tool call in reply N shows its result once request N+1 arrives; the result in
    request N+1 links back to the call.
 4. System prompt, tools and earlier history are collapsed; "changed" badges show up only
-   when the content changed for the same model.
+   when the content changed within the same conversation thread, and opening the section
+   shows what changed (e.g. a tool added mid-session appears as a green `+` row).
 5. Reload the page, or restart the proxy: history is still there (after a restart the
    page reloads itself).
 6. While scrolled down, new cards don't move what you're reading and the pill appears.
@@ -487,9 +505,11 @@ are kept as built:
 - "New this turn" = messages after the last assistant message (replacing a comparison
   with the previous request).
 - The "changed" badge compares with the previous request **to the same model** (and,
-  since session grouping was added, in the same session).
+  since session grouping was added, in the same session; since the diff view, in the
+  same thread).
 - Session grouping (see Sessions), added after the first build.
 - Cost estimate and context bar (see Cost and context), added after session grouping.
+- Diff view for the "changed" badge, and thread-based pairing (see Request card).
 - Exact colors, fonts and the legend bar (see Look).
 - The page reloads itself when the proxy restarts (`reset` event).
 - Replies are shown growing while they stream; tool input shows as raw text until
@@ -499,4 +519,4 @@ are kept as built:
 
 ## Open questions (for later)
 
-- Diff view for a changed system prompt or tool list?
+None right now.
