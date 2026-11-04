@@ -144,6 +144,19 @@ details.block > summary { padding-right: 10px; }
 .j-punct { color: var(--muted); }
 .raw-label { font-size: 12px; font-weight: 600; margin: 8px 0 2px; color: var(--muted); }
 
+/* diff of a changed system prompt / tool list */
+.changes { border: 1px solid var(--call); border-radius: 6px; background: var(--call-bg); padding: 6px 10px 8px; margin: 6px 0 12px; }
+.changes-head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; font-size: 12px; font-weight: 600; color: var(--call); }
+.changes-head a { color: inherit; }
+.changes-head .sec-meta { font-weight: 400; }
+.diff { font: 12px/1.5 var(--mono); margin-top: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.d-line { display: flex; gap: 8px; padding: 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.d-mark { flex: none; width: 10px; color: var(--muted); user-select: none; }
+.d-add { background: var(--claude-bg); } .d-add .d-mark { color: var(--claude); }
+.d-del { background: var(--error-bg); }  .d-del .d-mark { color: var(--error); }
+.d-skip { padding: 1px 8px; color: var(--muted); font-style: italic; background: var(--code-bg); }
+.changes .tool > summary { align-items: baseline; }
+
 @media (max-width: 600px) {
   main { padding: 12px; }
   .section-body { padding: 2px 10px 10px; }
@@ -598,13 +611,104 @@ function selectSession(sid) {
 // Strip cache_control: Claude Code moves those markers around between requests.
 function canon(v) { return JSON.stringify(v ?? null, (k, val) => (k === "cache_control" ? undefined : val)); }
 
-function previousSameModel(ex) {
-  const model = ex.request.body?.model;
+// A thread = one conversation inside a session: same session, same model, same first message.
+// Every turn repeats the first message, while side calls (titles, quota checks) and subagents
+// start their own, so they don't make the main conversation's system prompt look "changed".
+function threadOf(ex) {
+  if (ex.thread == null) {
+    const b = ex.request.body || {};
+    ex.thread = `${sessionOf(ex)}|${b.model}|${canon((b.messages || [])[0])}`;
+  }
+  return ex.thread;
+}
+
+function previousInThread(ex) {
+  const key = threadOf(ex);
   for (let i = order.indexOf(ex.id) - 1; i >= 0; i--) {
     const p = exchanges.get(order[i]);
-    if (isMessages(p) && p.request.body?.model === model && sessionOf(p) === sessionOf(ex)) return p;
+    if (isMessages(p) && threadOf(p) === key) return p;
   }
   return null;
+}
+
+// ---------- diffs ----------
+// Line diff: common prefix and suffix are trimmed first (changes are usually small), then an
+// LCS table on what's left; if that would be too big, the middle is shown as removed + added.
+function lineDiff(a, b) {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  let ea = a.length, eb = b.length;
+  while (ea > i && eb > i && a[ea - 1] === b[eb - 1]) { ea--; eb--; }
+  const A = a.slice(i, ea), B = b.slice(i, eb), n = A.length, m = B.length, mid = [];
+  if (n * m > 1e6) {
+    A.forEach(x => mid.push(["-", x]));
+    B.forEach(x => mid.push(["+", x]));
+  } else {
+    const L = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+    for (let x = n - 1; x >= 0; x--)
+      for (let y = m - 1; y >= 0; y--)
+        L[x][y] = A[x] === B[y] ? L[x + 1][y + 1] + 1 : Math.max(L[x + 1][y], L[x][y + 1]);
+    let x = 0, y = 0;
+    while (x < n && y < m) {
+      if (A[x] === B[y]) { mid.push([" ", A[x]]); x++; y++; }
+      else if (L[x + 1][y] >= L[x][y + 1]) mid.push(["-", A[x++]]);
+      else mid.push(["+", B[y++]]);
+    }
+    while (x < n) mid.push(["-", A[x++]]);
+    while (y < m) mid.push(["+", B[y++]]);
+  }
+  return [...a.slice(0, i).map(x => [" ", x]), ...mid, ...a.slice(ea).map(x => [" ", x])];
+}
+
+// Changed lines with 3 lines of context; longer unchanged runs fold into one "⋯ N unchanged lines" row.
+function diffView(ops, ctx = 3) {
+  const keep = ops.map(() => false);
+  ops.forEach(([t], k) => { if (t !== " ") for (let d = -ctx; d <= ctx; d++) if (k + d >= 0 && k + d < ops.length) keep[k + d] = true; });
+  const rows = [];
+  let skipped = 0;
+  const flush = () => { if (skipped) rows.push(h("div", { class: "d-skip" }, `⋯ ${skipped} unchanged line${skipped === 1 ? "" : "s"}`)); skipped = 0; };
+  ops.forEach(([t, line], k) => {
+    if (!keep[k]) { skipped++; return; }
+    flush();
+    rows.push(h("div", { class: "d-line " + (t === "+" ? "d-add" : t === "-" ? "d-del" : "") }, h("span", { class: "d-mark" }, t), line || " "));
+  });
+  flush();
+  return { el: h("div", { class: "diff" }, rows), add: ops.filter(o => o[0] === "+").length, del: ops.filter(o => o[0] === "-").length };
+}
+
+function stripCache(v) { return JSON.parse(canon(v)); }
+
+function changesBox(prev, meta, body) {
+  const link = h("a", { href: `#x${prev.id}`, onclick: e => {
+    e.preventDefault();
+    const el = exchanges.get(prev.id)?.el;
+    if (el?.isConnected) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  } }, `#${prev.id}`);
+  return h("div", { class: "changes" }, h("div", { class: "changes-head" }, "changes since ", link, h("span", { class: "sec-meta" }, meta)), body);
+}
+
+function systemDiff(prev, cur) {
+  const d = diffView(lineDiff(systemParts(prev.request.body.system).join("\n").split("\n"), systemParts(cur).join("\n").split("\n")));
+  return changesBox(prev, `−${d.del} +${d.add} lines`, d.el);
+}
+
+function toolsDiff(prev, cur) {
+  const key = t => t.name || t.type;
+  const P = new Map((prev.request.body.tools || []).map(t => [key(t), t])), C = new Map((cur || []).map(t => [key(t), t]));
+  const added = [...C.keys()].filter(n => !P.has(n)), removed = [...P.keys()].filter(n => !C.has(n));
+  const changed = [...C.keys()].filter(n => P.has(n) && canon(C.get(n)) !== canon(P.get(n)));
+  const rows = [
+    ...added.map(n => h("div", { class: "d-line d-add" }, h("span", { class: "d-mark" }, "+"),
+      h("span", null, h("b", null, n), " ", h("span", { class: "muted" }, firstLine(C.get(n).description || "", 100))))),
+    ...removed.map(n => h("div", { class: "d-line d-del" }, h("span", { class: "d-mark" }, "-"), h("b", null, n))),
+  ];
+  const changedRows = changed.map(n => {
+    const d = diffView(lineDiff(pretty(stripCache(P.get(n))).split("\n"), pretty(stripCache(C.get(n))).split("\n")));
+    return lazyDetails([h("span", { class: "tool-name" }, `~ ${n}`), h("span", { class: "sec-meta" }, `−${d.del} +${d.add} lines`)], () => d.el, { cls: "tool" });
+  });
+  const meta = [added.length && `${added.length} added`, removed.length && `${removed.length} removed`, changed.length && `${changed.length} changed`]
+    .filter(Boolean).join(", ") || "same tools, new order";
+  return changesBox(prev, meta, [rows.length ? h("div", { class: "diff" }, rows) : null, changedRows]);
 }
 
 function searchText(ex) {
@@ -681,16 +785,18 @@ function renderCard(ex) {
 
   if (isMessages(ex)) {
     const body = ex.request.body || {};
-    const prev = previousSameModel(ex);
+    const prev = previousInThread(ex);
     const prevBody = prev?.request.body || {};
+    const sysChanged = prev && canon(prevBody.system) !== canon(body.system);
+    const toolsChanged = prev && canon(prevBody.tools) !== canon(body.tools);
     if (body.system) {
       const chars = systemParts(body.system).join("").length;
-      card.append(lazyDetails(sectionTitle("System prompt", `${chars.toLocaleString()} chars`, prev && canon(prevBody.system) !== canon(body.system)),
-        () => h("div", { class: "section-body" }, renderSystem(body.system))));
+      card.append(lazyDetails(sectionTitle("System prompt", `${chars.toLocaleString()} chars`, sysChanged),
+        () => h("div", { class: "section-body" }, sysChanged ? systemDiff(prev, body.system) : null, renderSystem(body.system))));
     }
     if (body.tools?.length)
-      card.append(lazyDetails(sectionTitle("Tools", `${body.tools.length} tool${body.tools.length === 1 ? "" : "s"}`, prev && canon(prevBody.tools) !== canon(body.tools)),
-        () => h("div", { class: "section-body" }, renderTools(body.tools))));
+      card.append(lazyDetails(sectionTitle("Tools", `${body.tools.length} tool${body.tools.length === 1 ? "" : "s"}`, toolsChanged),
+        () => h("div", { class: "section-body" }, toolsChanged ? toolsDiff(prev, body.tools) : null, renderTools(body.tools))));
 
     // New this turn = everything after the last assistant message (your prompt, or the tool results).
     const msgs = body.messages || [];
